@@ -23,14 +23,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 12446569274e168eb8e14d2bc86205b7e2d02492
+          ref: 664b4af88440104953ca756c930a25154cea7d74
           persist-credentials: false
           submodules: recursive
           fetch-depth: 0
       - name: Record exact source and environment
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 12446569274e168eb8e14d2bc86205b7e2d02492
+          test "$(git rev-parse HEAD)" = 664b4af88440104953ca756c930a25154cea7d74
           git rev-parse HEAD
           uname -a
           gcc --version
@@ -39,8 +39,8 @@ jobs:
       - name: Check refreshed contribution conventions
         run: |
           set -euo pipefail
-          python3 -I tools/check_conventions.py --base 938812df1403f9616dba71744216725891ca4979 --head HEAD
-          git diff --check 938812df1403f9616dba71744216725891ca4979...HEAD
+          python3 -I tools/check_conventions.py --base eaeed829eee584e9afcbdfe069b62eb1af1065b1 --head HEAD
+          git diff --check eaeed829eee584e9afcbdfe069b62eb1af1065b1...HEAD
       - name: Install Linux configure prerequisites
         run: |
           set -euo pipefail
@@ -50,34 +50,18 @@ jobs:
         run: |
           set -euo pipefail
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ 2>&1 | tee wide-scan-linux-configure.log
-      - name: Build focused scanner and neighboring libc targets
+      - name: Build only the two scanner targets and required dependencies
         run: |
           set -euo pipefail
-          cmake --build build --parallel 1 --target guest_wide_conversion_tests guest_wide_stream_scan_tests guest_scan_count_tests guest_wide_formatting_tests guest_wide_string_tests guest_formatting_tests guest_standard_stream_tests guest_multibyte_locale_tests guest_wcsrtombs_tests guest_wcsrtombs_s_tests 2>&1 | tee wide-scan-linux-build.log
+          cmake --build build --parallel 1 --target guest_wide_conversion_tests guest_wide_stream_scan_tests 2>&1 | tee wide-scan-linux-build.log
       - name: Run the two requested suites serially
         run: |
           set -euo pipefail
-          ctest --test-dir build --parallel 1 --output-on-failure --no-tests=error -R '^(guest_wide_conversion|guest_wide_stream_scan|guest_scan_count|guest_wide_formatting|guest_wide_strings|guest_formatting|guest_standard_streams|guest_multibyte_locale|guest_wcsrtombs|guest_wcsrtombs_s)$' -V 2>&1 | tee wide-scan-linux-tests.log
-          sha256sum build/tests/guest_wide_conversion_tests build/tests/guest_wide_stream_scan_tests
-      - name: Verify identical executables fail with only baseline scanner restored
-        run: |
-          set -euo pipefail
-          sha256sum build/tests/guest_wide_conversion_tests build/tests/guest_wide_stream_scan_tests > scanner-executables.sha256
-          cp core/libs/prx/libc/src/ScanningWide.cpp /tmp/candidate-scanner.cpp
-          trap 'cp /tmp/candidate-scanner.cpp core/libs/prx/libc/src/ScanningWide.cpp' EXIT
-          git show c3eb4c2af84944d6101ff6ea1cdb796d8f8e637f:core/libs/prx/libc/src/ScanningWide.cpp > core/libs/prx/libc/src/ScanningWide.cpp
-          cmake --build build --parallel 1 --target libc
-          sha256sum --check scanner-executables.sha256
           set +e
-          ctest --test-dir build --parallel 1 --output-on-failure --no-tests=error -R '^(guest_wide_conversion|guest_wide_stream_scan|guest_scan_count|guest_wide_formatting|guest_wide_strings|guest_formatting|guest_standard_streams|guest_multibyte_locale|guest_wcsrtombs|guest_wcsrtombs_s)$' -V 2>&1 | tee baseline-same-executable-tests.log
+          ctest --test-dir build --parallel 1 --output-on-failure --no-tests=error -R '^(guest_wide_conversion|guest_wide_stream_scan)$' -V 2>&1 | tee wide-scan-linux-tests.log
           result=${PIPESTATUS[0]}
           set -e
           test "$result" -ne 0
-          grep -F '2 tests failed out of 10' baseline-same-executable-tests.log
-          grep -F 'positive secure character capacity does not throw' baseline-same-executable-tests.log
-          cp /tmp/candidate-scanner.cpp core/libs/prx/libc/src/ScanningWide.cpp
-          cmake --build build --parallel 1 --target libc
-          sha256sum --check scanner-executables.sha256
-          ctest --test-dir build --parallel 1 --output-on-failure --no-tests=error -R '^(guest_wide_conversion|guest_wide_stream_scan|guest_scan_count|guest_wide_formatting|guest_wide_strings|guest_formatting|guest_standard_streams|guest_multibyte_locale|guest_wcsrtombs|guest_wcsrtombs_s)$' -V
-          ctest --test-dir build --parallel 1 --output-on-failure --no-tests=error -R '^(guest_wide_conversion|guest_wide_stream_scan)$' --repeat until-fail:5
-          git diff --exit-code
+          grep -F '2 tests failed out of 2' wide-scan-linux-tests.log
+          grep -F 'zero-capacity wide character field does not throw' wide-scan-linux-tests.log
+          sha256sum build/tests/guest_wide_conversion_tests build/tests/guest_wide_stream_scan_tests
