@@ -23,14 +23,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: c677508e0eda25afd3fd4e92f8d47b50b51a58af
+          ref: c3eb4c2af84944d6101ff6ea1cdb796d8f8e637f
           persist-credentials: false
           submodules: recursive
           fetch-depth: 0
       - name: Record exact source and environment
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = c677508e0eda25afd3fd4e92f8d47b50b51a58af
+          test "$(git rev-parse HEAD)" = c3eb4c2af84944d6101ff6ea1cdb796d8f8e637f
           git rev-parse HEAD
           uname -a
           gcc --version
@@ -39,8 +39,8 @@ jobs:
       - name: Check refreshed contribution conventions
         run: |
           set -euo pipefail
-          python3 -I tools/check_conventions.py --base 9a030c2d504965cc646091030eaade1fd4a8b8d0 --head HEAD
-          git diff --check 9a030c2d504965cc646091030eaade1fd4a8b8d0...HEAD
+          python3 -I tools/check_conventions.py --base 938812df1403f9616dba71744216725891ca4979 --head HEAD
+          git diff --check 938812df1403f9616dba71744216725891ca4979...HEAD
       - name: Install Linux configure prerequisites
         run: |
           set -euo pipefail
@@ -57,5 +57,11 @@ jobs:
       - name: Run the two requested suites serially
         run: |
           set -euo pipefail
+          set +e
           ctest --test-dir build --parallel 1 --output-on-failure --no-tests=error -R '^(guest_wide_conversion|guest_wide_stream_scan)$' -V 2>&1 | tee wide-scan-linux-tests.log
+          result=${PIPESTATUS[0]}
+          set -e
+          test "$result" -ne 0
+          grep -F '2 tests failed out of 2' wide-scan-linux-tests.log
+          grep -F 'positive secure character capacity does not throw' wide-scan-linux-tests.log
           sha256sum build/tests/guest_wide_conversion_tests build/tests/guest_wide_stream_scan_tests
