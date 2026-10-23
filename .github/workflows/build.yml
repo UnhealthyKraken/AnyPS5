@@ -23,14 +23,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 9c86843ab18b24512900334f18bf14335d99d270
+          ref: 727ea2f3c9b71464801129452b61f1ba62ae4e88
           persist-credentials: false
           submodules: recursive
           fetch-depth: 1
       - name: Record exact source and environment
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 9c86843ab18b24512900334f18bf14335d99d270
+          test "$(git rev-parse HEAD)" = 727ea2f3c9b71464801129452b61f1ba62ae4e88
           git rev-parse HEAD
           git submodule status 3rdparty/jxrlib
           uname -a
@@ -53,6 +53,34 @@ jobs:
       - name: Run focused raw and patched library behavior tests
         run: |
           set -euo pipefail
+          readelf -d build/core/libs/libs/libSceJxr.prx
+          sha256sum build/tests/guest_jxr_lookup_tests > jxr-test-binary.sha256
+          kernel="$PWD/build/core/libs/libs/libkernel.prx"
+          held="$PWD/build/core/libs/libs/libkernel.prx.omission-control"
+          test -f "$kernel"
+          test ! -e "$held"
+          mv -- "$kernel" "$held"
+          trap 'mv -- "$held" "$kernel"' EXIT
+          python3 - <<'PY'
+          import ctypes
+          try:
+              ctypes.CDLL('build/core/libs/libs/libSceJxr.prx')
+          except OSError as error:
+              print('Controlled missing dependency:', error, flush=True)
+              if 'libkernel.prx' not in str(error):
+                  raise
+          else:
+              raise SystemExit('Patched module unexpectedly loaded without its kernel dependency')
+          PY
+          set +e
+          ctest --test-dir build --parallel 1 --output-on-failure --no-tests=error -R '^guest_jxr_lookup_patched$' -V > jxr-linux-omission-control.log 2>&1
+          control_status=$?
+          set -e
+          cat jxr-linux-omission-control.log
+          test "$control_status" -eq 8
+          mv -- "$held" "$kernel"
+          trap - EXIT
+          sha256sum -c jxr-test-binary.sha256
           ctest --test-dir build --parallel 1 --output-on-failure --no-tests=error -R '^(guest_jxr|guest_jxr_lookup(_reference|_patched)?)$' -V 2>&1 | tee jxr-linux-tests.log
           sha256sum build/tests/guest_jxr_lookup_tests
           readelf --dyn-syms --wide build/core/libs/libs/libSceJxr.prx | grep -F 5Gjz1nLOKvo
