@@ -4,6 +4,9 @@ on:
     branches: [ci/review-system-libraries-20261025]
 permissions:
   contents: read
+concurrency:
+  group: system-library-review-20261025
+  cancel-in-progress: false
 jobs:
   linux-focused:
     if: github.repository == 'UnhealthyKraken/AnyPS5' && github.ref == 'refs/heads/ci/review-system-libraries-20261025'
@@ -66,7 +69,7 @@ jobs:
           exit "$failed"
   apple-clang-focused:
     needs: linux-focused
-    if: always() && github.repository == 'UnhealthyKraken/AnyPS5' && github.ref == 'refs/heads/ci/review-system-libraries-20261025'
+    if: always() && !cancelled() && github.repository == 'UnhealthyKraken/AnyPS5' && github.ref == 'refs/heads/ci/review-system-libraries-20261025'
     runs-on: macos-15-intel
     timeout-minutes: 30
     env:
@@ -116,7 +119,7 @@ jobs:
           git diff --exit-code
   windows-focused:
     needs: apple-clang-focused
-    if: always() && github.repository == 'UnhealthyKraken/AnyPS5' && github.ref == 'refs/heads/ci/review-system-libraries-20261025'
+    if: always() && !cancelled() && github.repository == 'UnhealthyKraken/AnyPS5' && github.ref == 'refs/heads/ci/review-system-libraries-20261025'
     runs-on: windows-latest
     timeout-minutes: 120
     env:
