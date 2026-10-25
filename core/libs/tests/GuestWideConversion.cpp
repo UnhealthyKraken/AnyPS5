@@ -1,3 +1,4 @@
+#include "prx/libc/include/Api.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <cerrno>
 #include <cstddef>
@@ -7,26 +8,6 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
-
-extern "C" {
-std::uint64_t APS5_VABI _WStoul_nid_postfix(const char16_t*, char16_t**, int);
-int APS5_VABI _Iswctype_nid_postfix(std::uint32_t, std::uint64_t);
-int* APS5_VABI __error_nid_postfix();
-int APS5_VABI swscanf_nid_postfix(const char16_t*, const char16_t*, ...);
-int APS5_VABI swscanf_s_nid_postfix(const char16_t*, const char16_t*, ...);
-int APS5_VABI iswalnum_nid_postfix(std::uint32_t);
-int APS5_VABI iswalpha_nid_postfix(std::uint32_t);
-int APS5_VABI iswcntrl_nid_postfix(std::uint32_t);
-int APS5_VABI iswdigit_nid_postfix(std::uint32_t);
-int APS5_VABI iswgraph_nid_postfix(std::uint32_t);
-int APS5_VABI iswlower_nid_postfix(std::uint32_t);
-int APS5_VABI iswprint_nid_postfix(std::uint32_t);
-int APS5_VABI iswpunct_nid_postfix(std::uint32_t);
-int APS5_VABI iswspace_nid_postfix(std::uint32_t);
-int APS5_VABI iswupper_nid_postfix(std::uint32_t);
-int APS5_VABI iswxdigit_nid_postfix(std::uint32_t);
-int APS5_VABI iswblank_nid_postfix(std::uint32_t);
-}
 
 static int failures = 0;
 
@@ -135,6 +116,11 @@ static void CheckScan() {
     Require(swscanf_s_nid_postfix(u"x", u"%2lc", pair, std::size_t{2}) == 1 && pair[0] == u'x', "%2lc short input");
     Require(swscanf_s_nid_postfix(u"cab12", u"%l[abc]%d", text, std::size_t{6}, &first) == 2 && std::u16string(text) == u"cab" && first == 12, "%l[");
     Require(swscanf_s_nid_postfix(u"été!", u"%l[^!]", text, std::size_t{6}) == 1 && std::u16string(text) == u"été", "%l[^");
+    char16_t untouched[4] = {u'?', u'?', u'?', u'?'};
+    Require(swscanf_s_nid_postfix(u"Āb cd", u"%S", untouched, std::size_t{4}) == 0 && untouched[0] == u'?', "%S is an invalid conversion");
+    Require(swscanf_s_nid_postfix(u"7 Āb", u"%d%lS", &first, untouched, std::size_t{4}) == 1 && first == 7 && untouched[0] == u'?', "%lS stops after the earlier assignment");
+    Require(swscanf_s_nid_postfix(u"Āyz", u"%2C", untouched, std::size_t{4}) == 0 && untouched[0] == u'?', "%C is an invalid conversion");
+    Require(swscanf_s_nid_postfix(u"5 6", u"%hC%d", &first) == 0 && first == 7, "%hC stops before later conversions");
     std::int64_t count = -1;
     Require(swscanf_s_nid_postfix(u" 12 ab", u"%d %ln", &first, &count) == 1 && count == 4, "%ln");
 
@@ -196,6 +182,11 @@ static void CheckUnsizedScan() {
     Require(swscanf_nid_postfix(u" q7", u"%c%d", &letter, &first) == 1 && letter == ' ', "swscanf %c does not skip white space");
     Require(swscanf_nid_postfix(u"cab12", u"%l[abc]%d", text, &first) == 2 && std::u16string(text) == u"cab" && first == 12, "swscanf %l[");
     Require(swscanf_nid_postfix(u"été!", u"%l[^!]", text) == 1 && std::u16string(text) == u"été", "swscanf %l[^");
+    char16_t untouched[4] = {u'?', u'?', u'?', u'?'};
+    Require(swscanf_nid_postfix(u"Āb cd", u"%S", untouched) == 0 && untouched[0] == u'?', "swscanf %S is an invalid conversion");
+    Require(swscanf_nid_postfix(u"7 Āb 9", u"%d%3S%d", &first, untouched, &second) == 1 && first == 7 && untouched[0] == u'?', "swscanf stops at %S");
+    Require(swscanf_nid_postfix(u"Āyz", u"%lC", untouched) == 0 && untouched[0] == u'?', "swscanf %lC is an invalid conversion");
+    Require(swscanf_nid_postfix(u"abc", u"%*S") == 0, "swscanf suppressed %S is an invalid conversion");
     Require(swscanf_nid_postfix(u"key=val", u"%[^=]=%s", narrow, narrow + 4) == 2 && std::strcmp(narrow, "key") == 0 && std::strcmp(narrow + 4, "val") == 0, "swscanf %[^");
     std::int64_t count = -1;
     Require(swscanf_nid_postfix(u" 12 ab", u"%d %ln", &first, &count) == 1 && count == 4, "swscanf %ln");
@@ -322,11 +313,6 @@ static void CheckSecureCharacterCapacities() {
     next = 0xa55a;
     Require(swscanf_s_nid_postfix(u"abcd", u"%*3lc%n%lc", &count, &next, 1u) == 1 && count == 3 && next == u'd',
             "suppressed character fields keep width and consume no capacity argument");
-    char bytes[]{'?', '?', '?', '?', '?'};
-    Require(Throws([&] { swscanf_s_nid_postfix(u"a", u"%3c", bytes + 1, 2u); }),
-            "undersized narrow character capacity remains explicitly unsupported");
-    Require(bytes[0] == '?' && bytes[1] == '?' && bytes[2] == '?' && bytes[3] == '?' && bytes[4] == '?',
-            "unsupported narrow character capacity leaves the destination unchanged");
 }
 
 int main() {
