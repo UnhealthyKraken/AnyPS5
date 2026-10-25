@@ -5,29 +5,148 @@ on:
 permissions:
   contents: read
 jobs:
-  apple-clang-baseline:
+  linux-focused:
     if: github.repository == 'UnhealthyKraken/AnyPS5' && github.ref == 'refs/heads/ci/review-system-libraries-20261025'
-    runs-on: macos-15-intel
-    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      CTEST_PARALLEL_LEVEL: '1'
+      OMP_NUM_THREADS: '1'
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 33a7053e79f6a8b8f11ff48e0f9dbb09bbbb0ee4
+          ref: 2cd532921bcae0b4b69834406e4113092535194c
           persist-credentials: false
-      - name: Reproduce both undeclared function errors in actual pinned sources
+          fetch-depth: 0
+          submodules: recursive
+      - name: Install configure prerequisites
+        timeout-minutes: 20
+        run: |
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y ninja-build pkg-config autoconf automake libtool nasm libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev libdbus-1-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxinerama-dev libxfixes-dev libxxf86vm-dev libvulkan-dev libssl-dev
+      - name: Validate exact PR snapshots serially with matching libraries
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD
-          xcrun clang --version
+          gcc --version
+          g++ --version
+          uname -a
+          lscpu
+          base=47f9cee2cd77ac7b7f98782de4836c41205e3bf9
+          failed=0
+          while IFS='|' read -r topic sha targets pattern repeat; do
+            if ! (
+              set -euo pipefail
+              git checkout --detach "$sha"
+              test "$(git rev-parse HEAD)" = "$sha"
+              git submodule update --init --recursive --jobs 1
+              if [[ "$topic" != hold-main ]]; then python3 -I tools/check_conventions.py --base "$base" --head HEAD; git diff --check "$base"...HEAD; fi
+              python3 -I core/libs/tests/test_public_headers.py --audit-only --manifest "$RUNNER_TEMP/public-$topic.json"
+              printf '#include "prx/libc/include/Api.hpp"\n#include "prx/libkernel/include/Api.hpp"\n' | g++ -std=c++20 -Werror -fsyntax-only -Icore/libs -x c++ -
+              cmake -S . -B build-focused -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+              if [[ -d build-focused/core/libs/libs ]]; then find build-focused/core/libs/libs -maxdepth 1 -type f -name '*.prx' -delete; fi
+              cmake --build build-focused --parallel 1 --target $targets
+              ctest --test-dir build-focused --parallel 1 --output-on-failure --no-tests=error -R "$pattern" -V
+              if [[ "$repeat" != 1 ]]; then ctest --test-dir build-focused --parallel 1 --output-on-failure --no-tests=error -R "$pattern" --repeat "until-fail:$repeat"; fi
+              git diff --exit-code
+            ) 2>&1 | tee "$RUNNER_TEMP/review-$topic.log"; then failed=1; fi
+          done <<'CASES'
+          scanner|5f290cecde56468bb507d4c72b9de50c03eeab87|guest_wide_conversion_tests guest_wide_stream_scan_tests|^(guest_wide_conversion|guest_wide_stream_scan)$|5
+          prefix|14b096d3d68406aeccc7b56f510f0d8616447cb1|guest_floating_prefix_tests|^guest_floating_prefix_(narrow|wide)(_patched)?$|2
+          lifecycle|8df45c965d9bbdad708cc771854e5f3331254642|guest_libc_threads_tests guest_pthread_key_tests guest_execute_once_tests guest_std_execute_once_tests|^(guest_libc_threads|guest_pthread_key|guest_execute_once|guest_std_execute_once)$|5
+          freetype|54dadc019e415d286a2ed1ca6fb4091b4ece6e68|guest_freetype_outline_border_tests|^guest_freetype_outline_border|2
+          jxr|2cd532921bcae0b4b69834406e4113092535194c|guest_jxr_tests guest_jxr_lookup_tests|^guest_jxr(_lookup(_reference|_patched)?)?$|2
+          hold-main|47f9cee2cd77ac7b7f98782de4836c41205e3bf9|guest_floating_point_tests|^guest_floating_point$|300
+          CASES
+          exit "$failed"
+  apple-clang-focused:
+    needs: linux-focused
+    if: always() && github.repository == 'UnhealthyKraken/AnyPS5' && github.ref == 'refs/heads/ci/review-system-libraries-20261025'
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      CTEST_PARALLEL_LEVEL: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 2cd532921bcae0b4b69834406e4113092535194c
+          persist-credentials: false
+      - name: Compile exact native sources and actual JXR CMake targets with Apple Clang
+        shell: bash
+        run: |
+          set -euo pipefail
           git submodule update --init --depth 1 3rdparty/jxrlib
           test "$(git -C 3rdparty/jxrlib rev-parse HEAD)" = f7521879862b9085318e814c6157490dd9dbbdb4
+          git rev-parse HEAD
+          xcrun clang --version
           for source in image/decode/segdec.c jxrgluelib/JXRGlueJxr.c; do
-            set +e
-            xcrun clang -std=c99 -Werror=implicit-function-declaration -fsyntax-only -D__ANSI__ -DDISABLE_PERF_MEASUREMENT -I3rdparty/jxrlib/common/include -I3rdparty/jxrlib/image/sys -I3rdparty/jxrlib/jxrgluelib "3rdparty/jxrlib/$source" > check.log 2>&1
-            code=$?
-            set -e
-            cat check.log
-            test "$code" -ne 0
-            if [[ "$source" == image/decode/segdec.c ]]; then grep -F '_byteswap_ulong' check.log; else grep -F 'wcslen' check.log; fi
+            xcrun clang -std=c99 -Werror=implicit-function-declaration -fsyntax-only -D__ANSI__ -DDISABLE_PERF_MEASUREMENT -include "$PWD/cmake/JxrCompat.h" -I3rdparty/jxrlib/common/include -I3rdparty/jxrlib/image/sys -I3rdparty/jxrlib/jxrgluelib "3rdparty/jxrlib/$source"
           done
+          export REPO_ROOT="$PWD"
+          harness="$RUNNER_TEMP/jxr-native"
+          mkdir -p "$harness"
+          ln -s "$PWD/3rdparty" "$harness/3rdparty"
+          ln -s "$PWD/cmake" "$harness/cmake"
+          cat > "$harness/CMakeLists.txt" <<'CMAKE'
+          cmake_minimum_required(VERSION 3.20)
+          project(JxrNativeReview C CXX)
+          set(CMAKE_CXX_STANDARD 20)
+          include(cmake/Jxr.cmake)
+          set(LIBS_INCLUDE_DIR "$ENV{REPO_ROOT}/core/libs")
+          add_library(jxr_lookup_native STATIC ${LIBS_INCLUDE_DIR}/prx/libSceJxr/src/NativeLookup.c)
+          configure_jxr_native(jxr_lookup_native)
+          target_include_directories(jxr_lookup_native PRIVATE ${LIBS_INCLUDE_DIR})
+          target_link_libraries(jxr_lookup_native PRIVATE jxr)
+          add_library(jxr_lookup_reference STATIC ${LIBS_INCLUDE_DIR}/tests/GuestJxrLookupReference.c)
+          configure_jxr_native(jxr_lookup_reference)
+          target_link_libraries(jxr_lookup_reference PRIVATE jxr)
+          add_executable(reference_probe ${LIBS_INCLUDE_DIR}/tests/GuestJxrLookup.cpp)
+          target_include_directories(reference_probe PRIVATE ${LIBS_INCLUDE_DIR})
+          target_link_libraries(reference_probe PRIVATE jxr_lookup_reference ${CMAKE_DL_LIBS})
+          CMAKE
+          cmake -S "$harness" -B "$harness/build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_FLAGS=-Werror=implicit-function-declaration
+          cmake --build "$harness/build" --parallel 1 --target jxr jxr_lookup_native jxr_lookup_reference reference_probe
+          "$harness/build/reference_probe" reference
+          git diff --exit-code
+  windows-focused:
+    needs: apple-clang-focused
+    if: always() && github.repository == 'UnhealthyKraken/AnyPS5' && github.ref == 'refs/heads/ci/review-system-libraries-20261025'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      CTEST_PARALLEL_LEVEL: '1'
+      WINLIBS_RELEASE: 15.2.0posix-14.0.0-ucrt-r7
+      WINLIBS_ZIP: winlibs-x86_64-posix-seh-gcc-15.2.0-mingw-w64ucrt-14.0.0-r7.zip
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 8df45c965d9bbdad708cc771854e5f3331254642
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: recursive
+      - name: Install supported hosted WinLibs toolchain
+        run: |
+          set -euo pipefail
+          curl -sSfL -o "$RUNNER_TEMP/winlibs.zip" "https://github.com/brechtsanders/winlibs_mingw/releases/download/$WINLIBS_RELEASE/$WINLIBS_ZIP"
+          7z x "$RUNNER_TEMP/winlibs.zip" -oC:/winlibs > /dev/null
+          echo 'C:\winlibs\mingw64\bin' >> "$GITHUB_PATH"
+          for prefix in ucrt64 mingw64; do
+            bundle="C:/Program Files/Git/$prefix/etc/ssl/certs/ca-bundle.crt"
+            if [ -f "$bundle" ]; then echo "SSL_CERT_FILE=$bundle" >> "$GITHUB_ENV"; break; fi
+          done
+      - name: Build and run complete lifecycle suite with matching Windows DLLs
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          g++ --version
+          cmake -S . -B build-focused -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+          cmake --build build-focused --parallel 1 --target guest_libc_threads_tests guest_pthread_key_tests guest_execute_once_tests guest_std_execute_once_tests
+          ctest --test-dir build-focused --parallel 1 --output-on-failure --no-tests=error -R '^(guest_libc_threads|guest_pthread_key|guest_execute_once|guest_std_execute_once)$' -V
+          ctest --test-dir build-focused --parallel 1 --output-on-failure --no-tests=error -R '^guest_libc_threads$' --repeat until-fail:5
+          git diff --exit-code
