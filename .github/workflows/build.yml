@@ -1,83 +1,33 @@
-name: Focused wide scanner Linux validation
-
+name: Focused system library review checks
 on:
   push:
-    branches: [ci/wide-scan-linux-9863]
-  workflow_dispatch:
-
+    branches: [ci/review-system-libraries-20261025]
 permissions:
   contents: read
-
 jobs:
-  wide-scan-linux:
-    if: github.repository == 'UnhealthyKraken/AnyPS5' && github.ref == 'refs/heads/ci/wide-scan-linux-9863'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      CMAKE_BUILD_PARALLEL_LEVEL: '1'
-      CTEST_PARALLEL_LEVEL: '1'
-      OMP_NUM_THREADS: '1'
-    defaults:
-      run:
-        shell: bash
+  apple-clang-baseline:
+    if: github.repository == 'UnhealthyKraken/AnyPS5' && github.ref == 'refs/heads/ci/review-system-libraries-20261025'
+    runs-on: macos-15-intel
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 925d839d4794202dfdf3fadaa466e9038f322528
+          ref: 33a7053e79f6a8b8f11ff48e0f9dbb09bbbb0ee4
           persist-credentials: false
-          submodules: recursive
-          fetch-depth: 0
-      - name: Record exact source and environment
+      - name: Reproduce both undeclared function errors in actual pinned sources
+        shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 925d839d4794202dfdf3fadaa466e9038f322528
           git rev-parse HEAD
-          uname -a
-          gcc --version
-          g++ --version
-          cmake --version
-      - name: Check refreshed contribution conventions
-        run: |
-          set -euo pipefail
-          python3 -I tools/check_conventions.py --base eaeed829eee584e9afcbdfe069b62eb1af1065b1 --head HEAD
-          git diff --check eaeed829eee584e9afcbdfe069b62eb1af1065b1...HEAD
-      - name: Install Linux configure prerequisites
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y ninja-build pkg-config autoconf automake libtool nasm libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev libdbus-1-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxinerama-dev libxfixes-dev libxxf86vm-dev libvulkan-dev libssl-dev
-      - name: Configure actual project with bundled dependencies
-        run: |
-          set -euo pipefail
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ 2>&1 | tee wide-scan-linux-configure.log
-      - name: Build focused scanner and neighboring libc targets
-        run: |
-          set -euo pipefail
-          cmake --build build --parallel 1 --target guest_wide_conversion_tests guest_wide_stream_scan_tests guest_scan_count_tests guest_wide_formatting_tests guest_wide_string_tests guest_formatting_tests guest_standard_stream_tests guest_multibyte_locale_tests guest_wcsrtombs_tests guest_wcsrtombs_s_tests 2>&1 | tee wide-scan-linux-build.log
-      - name: Run the two requested suites serially
-        run: |
-          set -euo pipefail
-          ctest --test-dir build --parallel 1 --output-on-failure --no-tests=error -R '^(guest_wide_conversion|guest_wide_stream_scan|guest_scan_count|guest_wide_formatting|guest_wide_strings|guest_formatting|guest_standard_streams|guest_multibyte_locale|guest_wcsrtombs|guest_wcsrtombs_s)$' -V 2>&1 | tee wide-scan-linux-tests.log
-          sha256sum build/tests/guest_wide_conversion_tests build/tests/guest_wide_stream_scan_tests
-      - name: Verify identical executables fail with only baseline scanner restored
-        run: |
-          set -euo pipefail
-          sha256sum build/tests/guest_wide_conversion_tests build/tests/guest_wide_stream_scan_tests > scanner-executables.sha256
-          cp core/libs/prx/libc/src/ScanningWide.cpp /tmp/candidate-scanner.cpp
-          trap 'cp /tmp/candidate-scanner.cpp core/libs/prx/libc/src/ScanningWide.cpp' EXIT
-          git show 664b4af88440104953ca756c930a25154cea7d74:core/libs/prx/libc/src/ScanningWide.cpp > core/libs/prx/libc/src/ScanningWide.cpp
-          cmake --build build --parallel 1 --target libc
-          sha256sum --check scanner-executables.sha256
-          set +e
-          ctest --test-dir build --parallel 1 --output-on-failure --no-tests=error -R '^(guest_wide_conversion|guest_wide_stream_scan|guest_scan_count|guest_wide_formatting|guest_wide_strings|guest_formatting|guest_standard_streams|guest_multibyte_locale|guest_wcsrtombs|guest_wcsrtombs_s)$' -V 2>&1 | tee baseline-same-executable-tests.log
-          result=${PIPESTATUS[0]}
-          set -e
-          test "$result" -ne 0
-          grep -F '2 tests failed out of 10' baseline-same-executable-tests.log
-          grep -F 'zero-capacity wide character field does not throw' baseline-same-executable-tests.log
-          cp /tmp/candidate-scanner.cpp core/libs/prx/libc/src/ScanningWide.cpp
-          cmake --build build --parallel 1 --target libc
-          sha256sum --check scanner-executables.sha256
-          ctest --test-dir build --parallel 1 --output-on-failure --no-tests=error -R '^(guest_wide_conversion|guest_wide_stream_scan|guest_scan_count|guest_wide_formatting|guest_wide_strings|guest_formatting|guest_standard_streams|guest_multibyte_locale|guest_wcsrtombs|guest_wcsrtombs_s)$' -V
-          ctest --test-dir build --parallel 1 --output-on-failure --no-tests=error -R '^(guest_wide_conversion|guest_wide_stream_scan)$' --repeat until-fail:5
-          git diff --exit-code
+          xcrun clang --version
+          git submodule update --init --depth 1 3rdparty/jxrlib
+          test "$(git -C 3rdparty/jxrlib rev-parse HEAD)" = f7521879862b9085318e814c6157490dd9dbbdb4
+          for source in image/decode/segdec.c jxrgluelib/JXRGlueJxr.c; do
+            set +e
+            xcrun clang -std=c99 -Werror=implicit-function-declaration -fsyntax-only -D__ANSI__ -DDISABLE_PERF_MEASUREMENT -I3rdparty/jxrlib/common/include -I3rdparty/jxrlib/image/sys -I3rdparty/jxrlib/jxrgluelib "3rdparty/jxrlib/$source" > check.log 2>&1
+            code=$?
+            set -e
+            cat check.log
+            test "$code" -ne 0
+            if [[ "$source" == image/decode/segdec.c ]]; then grep -F '_byteswap_ulong' check.log; else grep -F 'wcslen' check.log; fi
+          done
