@@ -36,7 +36,8 @@ jobs:
           base=47f9cee2cd77ac7b7f98782de4836c41205e3bf9
           failed=0
           while IFS='|' read -r topic sha targets pattern repeat; do
-            if ! (
+            set +e
+            (
               set -euo pipefail
               git checkout --detach "$sha"
               test "$(git rev-parse HEAD)" = "$sha"
@@ -50,7 +51,10 @@ jobs:
               ctest --test-dir build-focused --parallel 1 --output-on-failure --no-tests=error -R "$pattern" -V
               if [[ "$repeat" != 1 ]]; then ctest --test-dir build-focused --parallel 1 --output-on-failure --no-tests=error -R "$pattern" --repeat "until-fail:$repeat"; fi
               git diff --exit-code
-            ) 2>&1 | tee "$RUNNER_TEMP/review-$topic.log"; then failed=1; fi
+            ) 2>&1 | tee "$RUNNER_TEMP/review-$topic.log"
+            status=${PIPESTATUS[0]}
+            set -e
+            if [[ "$status" -ne 0 ]]; then failed=1; fi
           done <<'CASES'
           scanner|5f290cecde56468bb507d4c72b9de50c03eeab87|guest_wide_conversion_tests guest_wide_stream_scan_tests|^(guest_wide_conversion|guest_wide_stream_scan)$|5
           prefix|14b096d3d68406aeccc7b56f510f0d8616447cb1|guest_floating_prefix_tests|^guest_floating_prefix_(narrow|wide)(_patched)?$|2
