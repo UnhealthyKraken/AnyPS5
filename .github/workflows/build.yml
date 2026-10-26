@@ -53,7 +53,7 @@ jobs:
               sha256sum core/libs/tests/GuestFreeTypePfr.cpp core/libs/tests/GuestFreeTypePfrNull.cpp core/libs/prx/libSceFreeType/src/Pfr.cpp
             fi
             trap 'git restore -- "$build_file"' EXIT
-            python3 -c 'import sys; from pathlib import Path; p=Path(sys.argv[1]); s=p.read_text(); n="    add_dependencies("+sys.argv[2]+" "+sys.argv[3]+")\n"; assert s.count(n)==1; p.write_text(s.replace(n,""))' "$build_file" "$test_target" "$patched_target"
+            python3 -c 'import sys; from pathlib import Path; p=Path(sys.argv[1]); s=p.read_text(); n="    add_dependencies("+sys.argv[2]+" "+sys.argv[3]+")"; assert s.count(n)==1; p.write_text(s.replace(n,""))' "$build_file" "$test_target" "$patched_target"
             cmake -S . -B build-behavior -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
             cmake --build build-behavior --parallel 1 --target $targets
             ctest --test-dir build-behavior --show-only=json-v1 -R "$pattern" > "$RUNNER_TEMP/selected.json"
