@@ -1,4 +1,4 @@
-name: Focused system library review checks
+name: Behavior review regression baseline
 on:
   push:
     branches: [ci/review-system-libraries-20261025]
@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 2cd532921bcae0b4b69834406e4113092535194c
+          ref: 4357ce29ae6cfccdcc356cb9eddf23aca9e7b997
           persist-credentials: false
           fetch-depth: 0
           submodules: recursive
@@ -28,124 +28,54 @@ jobs:
         run: |
           sudo apt-get update
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y ninja-build pkg-config autoconf automake libtool nasm libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev libdbus-1-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxinerama-dev libxfixes-dev libxxf86vm-dev libvulkan-dev libssl-dev
-      - name: Validate exact PR snapshots serially with matching libraries
+      - name: Confirm regression failures against unchanged production
         shell: bash
         run: |
           set -euo pipefail
           gcc --version
           g++ --version
-          uname -a
-          lscpu
-          base=47f9cee2cd77ac7b7f98782de4836c41205e3bf9
-          failed=0
-          while IFS='@' read -r -u 3 topic sha targets pattern repeat count; do
+          while IFS='@' read -r -u 3 topic sha targets pattern failures; do
+            git checkout --detach "$sha"
+            test "$(git rev-parse HEAD)" = "$sha"
+            git submodule update --init --recursive --jobs 1
+            python3 -I tools/check_conventions.py --base 504ea3b53b237a5ea99e6daeee23b1edf3758368 --head HEAD
+            git diff --check 504ea3b53b237a5ea99e6daeee23b1edf3758368...HEAD
+            python3 -I core/libs/tests/test_public_headers.py --audit-only --manifest "$RUNNER_TEMP/public-$topic.json"
+            if [[ "$topic" == jxr ]]; then
+              build_file=core/libs/prx/libSceJxr/CMakeLists.txt
+              test_target=guest_jxr_lookup_tests
+              patched_target=jxr_lookup_patched
+              sha256sum core/libs/tests/GuestJxrLookup.cpp core/libs/prx/libSceJxr/src/PixelFormatLookup.cpp
+            else
+              build_file=core/libs/prx/libSceFreeTypeOptOl/CMakeLists.txt
+              test_target=guest_freetype_pfr_tests
+              patched_target=guest_freetype_pfr_libraries
+              sha256sum core/libs/tests/GuestFreeTypePfr.cpp core/libs/tests/GuestFreeTypePfrNull.cpp core/libs/prx/libSceFreeType/src/Pfr.cpp
+            fi
+            trap 'git restore -- "$build_file"' EXIT
+            python3 -c 'import sys; from pathlib import Path; p=Path(sys.argv[1]); s=p.read_text(); n="    add_dependencies("+sys.argv[2]+" "+sys.argv[3]+")\n"; assert s.count(n)==1; p.write_text(s.replace(n,""))' "$build_file" "$test_target" "$patched_target"
+            cmake -S . -B build-behavior -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+            cmake --build build-behavior --parallel 1 --target $targets
+            ctest --test-dir build-behavior --show-only=json-v1 -R "$pattern" > "$RUNNER_TEMP/selected.json"
+            python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert len(d["tests"])==5,d' "$RUNNER_TEMP/selected.json"
             set +e
-            (
-              set -euo pipefail
-              git checkout --detach "$sha"
-              test "$(git rev-parse HEAD)" = "$sha"
-              git submodule update --init --recursive --jobs 1
-              if [[ "$topic" != hold-main ]]; then python3 -I tools/check_conventions.py --base "$base" --head HEAD; git diff --check "$base"...HEAD; fi
-              python3 -I core/libs/tests/test_public_headers.py --audit-only --manifest "$RUNNER_TEMP/public-$topic.json"
-              printf '#include "prx/libc/include/Api.hpp"\n#include "prx/libkernel/include/Api.hpp"\n' | g++ -std=c++20 -Werror -fsyntax-only -Icore/libs -x c++ -
-              cmake -S . -B build-focused -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
-              if [[ -d build-focused/core/libs/libs ]]; then find build-focused/core/libs/libs -maxdepth 1 -type f -name '*.prx' -delete; fi
-              python3 -c "import re,sys; re.compile(sys.argv[1])" "$pattern"
-              cmake --build build-focused --parallel 1 --target $targets
-              ctest --test-dir build-focused --show-only=json-v1 -R "$pattern" > "$RUNNER_TEMP/selected-tests.json"
-              python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert len(d['tests']) == int(sys.argv[2]), d" "$RUNNER_TEMP/selected-tests.json" "$count"
-              ctest --test-dir build-focused --parallel 1 --output-on-failure --no-tests=error -R "$pattern" -V
-              if [[ "$repeat" != 1 ]]; then ctest --test-dir build-focused --parallel 1 --output-on-failure --no-tests=error -R "$pattern" --repeat "until-fail:$repeat"; fi
-              if [[ "$topic" == freetype ]]; then
-                sha256sum build-focused/tests/guest_freetype_outline_border_tests > "$RUNNER_TEMP/ft-tests.sha256"
-                readelf -d build-focused/core/libs/libs/libSceFreeTypeOt.prx
-                mv build-focused/core/libs/libs/libkernel.prx "$RUNNER_TEMP/held-kernel.prx"
-                trap 'mv "$RUNNER_TEMP/held-kernel.prx" build-focused/core/libs/libs/libkernel.prx' EXIT
-                python3 -c "import ctypes,os; p='build-focused/core/libs/libs/libSceFreeTypeOt.prx'; exec('try:\n ctypes.CDLL(p, mode=os.RTLD_NOW | os.RTLD_LOCAL)\nexcept OSError as e:\n print(e); assert \'libkernel.prx\' in str(e)\nelse:\n raise AssertionError(\'missing kernel unexpectedly loaded\')')"
-                set +e
-                ctest --test-dir build-focused --parallel 1 --output-on-failure --no-tests=error -R '^guest_freetype_outline_border_.*_patched$' -V > "$RUNNER_TEMP/ft-missing-kernel.log" 2>&1
-                negative_status=$?
-                set -e
-                cat "$RUNNER_TEMP/ft-missing-kernel.log"
-                test "$negative_status" -ne 0
-                grep -F '4 tests failed out of 4' "$RUNNER_TEMP/ft-missing-kernel.log"
-                mv "$RUNNER_TEMP/held-kernel.prx" build-focused/core/libs/libs/libkernel.prx
-                trap - EXIT
-                sha256sum --check "$RUNNER_TEMP/ft-tests.sha256"
-                ctest --test-dir build-focused --parallel 1 --output-on-failure --no-tests=error -R '^guest_freetype_outline_border' -V
-              fi
-              git diff --exit-code
-            ) 2>&1 | tee "$RUNNER_TEMP/review-$topic.log"
-            status=${PIPESTATUS[0]}
+            ctest --test-dir build-behavior --parallel 1 --output-on-failure --no-tests=error -R "$pattern" -V > "$RUNNER_TEMP/red-$topic.log" 2>&1
+            status=$?
             set -e
-            if [[ "$status" -ne 0 ]]; then failed=1; fi
+            cat "$RUNNER_TEMP/red-$topic.log"
+            test "$status" -ne 0
+            grep -F "$failures tests failed out of 5" "$RUNNER_TEMP/red-$topic.log"
+            if [[ "$topic" == jxr ]]; then
+              grep -F 'forward success padding is not zero' "$RUNNER_TEMP/red-$topic.log"
+              grep -F 'reverse success padding is not zero' "$RUNNER_TEMP/red-$topic.log"
+            else
+              grep -F 'PFR null face: metrics returned 35, expected 6; host imports 1' "$RUNNER_TEMP/red-$topic.log"
+              test "$(grep -c 'PFR null-face returned 35, expected 6' "$RUNNER_TEMP/red-$topic.log")" -ge 3
+            fi
+            git restore -- "$build_file"
+            trap - EXIT
+            git diff --exit-code
           done 3<<'CASES'
-          scanner@5f290cecde56468bb507d4c72b9de50c03eeab87@guest_wide_conversion_tests guest_wide_stream_scan_tests@^(guest_wide_conversion|guest_wide_stream_scan)$@5@2
-          prefix@14b096d3d68406aeccc7b56f510f0d8616447cb1@guest_floating_prefix_tests@^guest_floating_prefix_(narrow|wide)(_patched)?$@2@4
-          lifecycle@8df45c965d9bbdad708cc771854e5f3331254642@guest_libc_threads_tests guest_pthread_key_tests guest_execute_once_tests guest_std_execute_once_tests@^(guest_libc_threads|guest_pthread_key|guest_execute_once|guest_std_execute_once)$@5@4
-          freetype@e9d4b8c282eda3ed49c7700f82f5a6228713dca2@guest_freetype_outline_border_tests@^guest_freetype_outline_border@2@9
-          jxr@2cd532921bcae0b4b69834406e4113092535194c@guest_jxr_tests guest_jxr_lookup_tests@^guest_jxr(_lookup(_reference|_patched)?)?$@2@4
+          jxr@4357ce29ae6cfccdcc356cb9eddf23aca9e7b997@guest_jxr_lookup_tests guest_jxr_tests@^(guest_jxr|guest_jxr_lookup(_reference|_padding_(forward|reverse))?)$@2
+          pfr@085c71dd366e64845ba8252524985e738bab9110@guest_freetype_pfr_null_face_tests guest_freetype_pfr_tests libSceFreeTypeOptOl@^guest_freetype_pfr_(reference|null_face|(metrics|advance|kerning)_raw)$@4
           CASES
-          exit "$failed"
-
-  windows-focused:
-    needs: linux-focused
-    if: always() && !cancelled() && github.repository == 'UnhealthyKraken/AnyPS5' && github.ref == 'refs/heads/ci/review-system-libraries-20261025'
-    runs-on: windows-latest
-    timeout-minutes: 120
-    env:
-      CMAKE_BUILD_PARALLEL_LEVEL: '1'
-      CTEST_PARALLEL_LEVEL: '1'
-      WINLIBS_RELEASE: 15.2.0posix-14.0.0-ucrt-r7
-      WINLIBS_ZIP: winlibs-x86_64-posix-seh-gcc-15.2.0-mingw-w64ucrt-14.0.0-r7.zip
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: 2cd532921bcae0b4b69834406e4113092535194c
-          persist-credentials: false
-          fetch-depth: 0
-          submodules: recursive
-      - name: Install supported hosted WinLibs toolchain
-        run: |
-          set -euo pipefail
-          curl -sSfL -o "$RUNNER_TEMP/winlibs.zip" "https://github.com/brechtsanders/winlibs_mingw/releases/download/$WINLIBS_RELEASE/$WINLIBS_ZIP"
-          7z x "$RUNNER_TEMP/winlibs.zip" -oC:/winlibs > /dev/null
-          echo 'C:\winlibs\mingw64\bin' >> "$GITHUB_PATH"
-          for prefix in ucrt64 mingw64; do
-            bundle="C:/Program Files/Git/$prefix/etc/ssl/certs/ca-bundle.crt"
-            if [ -f "$bundle" ]; then echo "SSL_CERT_FILE=$bundle" >> "$GITHUB_ENV"; break; fi
-          done
-      - name: Validate remaining affected Windows targets serially
-        run: |
-          set -euo pipefail
-          gcc --version
-          g++ --version
-          failed=0
-          while IFS='@' read -r -u 3 topic sha targets pattern; do
-            set +e
-            (
-              set -euo pipefail
-              git checkout --detach "$sha"
-              test "$(git rev-parse HEAD)" = "$sha"
-              git submodule update --init --recursive --jobs 1
-              python -I core/libs/tests/test_public_headers.py --audit-only --manifest "$RUNNER_TEMP/public-$topic.json"
-              cmake -S . -B build-focused -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
-              if [[ -d build-focused/core/libs/libs ]]; then /usr/bin/find build-focused/core/libs/libs -maxdepth 1 -type f -name '*.prx' -delete; fi
-              cmake --build build-focused --parallel 1 --target $targets
-              ctest --test-dir build-focused --parallel 1 --output-on-failure --no-tests=error -R "$pattern" -V
-              ctest --test-dir build-focused --parallel 1 --output-on-failure --no-tests=error -R "$pattern" --repeat until-fail:2
-              git diff --exit-code
-            ) 2>&1 | tee "$RUNNER_TEMP/windows-review-$topic.log"
-            status=${PIPESTATUS[0]}
-            set -e
-            if [[ "$status" -ne 0 ]]; then failed=1; fi
-          done 3<<'CASES'
-          scanner@5f290cecde56468bb507d4c72b9de50c03eeab87@guest_wide_conversion_tests guest_wide_stream_scan_tests@^(guest_wide_conversion|guest_wide_stream_scan)$
-          prefix@14b096d3d68406aeccc7b56f510f0d8616447cb1@guest_floating_prefix_tests@^guest_floating_prefix_(narrow|wide)(_patched)?$
-          freetype@e9d4b8c282eda3ed49c7700f82f5a6228713dca2@guest_freetype_outline_border_tests@^guest_freetype_outline_border
-          jxr@2cd532921bcae0b4b69834406e4113092535194c@guest_jxr_tests guest_jxr_lookup_tests@^guest_jxr(_lookup(_reference|_patched)?)?$
-          CASES
-          exit "$failed"
