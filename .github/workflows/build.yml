@@ -1,4 +1,4 @@
-name: Behavior review regression baseline
+name: Focused behavior review validation
 on:
   push:
     branches: [ci/review-system-libraries-20261025]
@@ -28,54 +28,230 @@ jobs:
         run: |
           sudo apt-get update
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y ninja-build pkg-config autoconf automake libtool nasm libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev libdbus-1-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxinerama-dev libxfixes-dev libxxf86vm-dev libvulkan-dev libssl-dev
-      - name: Confirm regression failures against unchanged production
+      - name: Compare baselines and candidates with complete focused suites
         shell: bash
         run: |
           set -euo pipefail
           gcc --version
           g++ --version
-          while IFS='@' read -r -u 3 topic sha targets pattern failures; do
-            git checkout --detach "$sha"
-            test "$(git rev-parse HEAD)" = "$sha"
-            git submodule update --init --recursive --jobs 1
-            python3 -I tools/check_conventions.py --base 504ea3b53b237a5ea99e6daeee23b1edf3758368 --head HEAD
-            git diff --check 504ea3b53b237a5ea99e6daeee23b1edf3758368...HEAD
-            python3 -I core/libs/tests/test_public_headers.py --audit-only --manifest "$RUNNER_TEMP/public-$topic.json"
-            if [[ "$topic" == jxr ]]; then
-              build_file=core/libs/prx/libSceJxr/CMakeLists.txt
-              test_target=guest_jxr_lookup_tests
-              patched_target=jxr_lookup_patched
-              sha256sum core/libs/tests/GuestJxrLookup.cpp core/libs/prx/libSceJxr/src/PixelFormatLookup.cpp
-            else
-              build_file=core/libs/prx/libSceFreeTypeOptOl/CMakeLists.txt
-              test_target=guest_freetype_pfr_tests
-              patched_target=guest_freetype_pfr_libraries
-              sha256sum core/libs/tests/GuestFreeTypePfr.cpp core/libs/tests/GuestFreeTypePfrNull.cpp core/libs/prx/libSceFreeType/src/Pfr.cpp
-            fi
-            trap 'git restore -- "$build_file"' EXIT
-            python3 -c 'import sys; from pathlib import Path; p=Path(sys.argv[1]); s=p.read_text(); n="    add_dependencies("+sys.argv[2]+" "+sys.argv[3]+")"; assert s.count(n)==1; p.write_text(s.replace(n,""))' "$build_file" "$test_target" "$patched_target"
-            cmake -S . -B build-behavior -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
-            cmake --build build-behavior --parallel 1 --target $targets
-            ctest --test-dir build-behavior --show-only=json-v1 -R "$pattern" > "$RUNNER_TEMP/selected.json"
-            python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert len(d["tests"])==5,d' "$RUNNER_TEMP/selected.json"
+          failed=0
+          while IFS='@' read -r -u 3 topic baseline candidate targets raw_pattern pattern failures; do
             set +e
-            ctest --test-dir build-behavior --parallel 1 --output-on-failure --no-tests=error -R "$pattern" -V > "$RUNNER_TEMP/red-$topic.log" 2>&1
+            (
+              set -euo pipefail
+              git checkout --detach "$baseline"
+              git submodule update --init --recursive --jobs 1
+              if [[ "$topic" == jxr ]]; then
+                build_file=core/libs/prx/libSceJxr/CMakeLists.txt
+                test_target=guest_jxr_lookup_tests
+                patched_target=jxr_lookup_patched
+                fixture=guest_jxr_lookup_tests
+                patched_pattern='^guest_jxr_lookup.*_patched$'
+                module=libSceJxr.prx
+              else
+                build_file=core/libs/prx/libSceFreeTypeOptOl/CMakeLists.txt
+                test_target=guest_freetype_pfr_tests
+                patched_target=guest_freetype_pfr_libraries
+                fixture=guest_freetype_pfr_tests
+                patched_pattern='^guest_freetype_pfr_(metrics|advance|kerning)_patched$'
+                module=libSceFreeType.prx
+              fi
+              link_flags=
+              if [[ "$RUNNER_OS" == Windows ]]; then
+                fixture=$fixture.exe
+                link_flags=-Wl,--no-insert-timestamp
+              fi
+              trap 'git restore -- "$build_file"' EXIT
+              python3 -c 'import sys; from pathlib import Path; p=Path(sys.argv[1]); s=p.read_text(); n="    add_dependencies("+sys.argv[2]+" "+sys.argv[3]+")"; assert s.count(n)==1; p.write_text(s.replace(n,""))' "$build_file" "$test_target" "$patched_target"
+              cmake -S . -B build-behavior -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DCMAKE_EXE_LINKER_FLAGS="$link_flags"
+              cmake --build build-behavior --parallel 1 --target $targets
+              ctest --test-dir build-behavior --show-only=json-v1 -R "$raw_pattern" > "$RUNNER_TEMP/selected.json"
+              python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert len(d["tests"])==5,d' "$RUNNER_TEMP/selected.json"
+              set +e
+              ctest --test-dir build-behavior --parallel 1 --output-on-failure --no-tests=error -R "$raw_pattern" -V > "$RUNNER_TEMP/red-$topic.log" 2>&1
+              red_status=$?
+              set -e
+              cat "$RUNNER_TEMP/red-$topic.log"
+              test "$red_status" -ne 0
+              grep -F "$failures tests failed out of 5" "$RUNNER_TEMP/red-$topic.log"
+              if [[ "$topic" == jxr ]]; then
+                grep -F 'forward success padding is not zero' "$RUNNER_TEMP/red-$topic.log"
+                grep -F 'reverse success padding is not zero' "$RUNNER_TEMP/red-$topic.log"
+              else
+                grep -F 'PFR null face: metrics returned 35, expected 6; host imports 1' "$RUNNER_TEMP/red-$topic.log"
+                test "$(grep -c 'PFR null-face returned 35, expected 6' "$RUNNER_TEMP/red-$topic.log")" -ge 3
+              fi
+              sha256sum "build-behavior/tests/$fixture" > "$RUNNER_TEMP/$topic-fixture.sha256"
+              git restore -- "$build_file"
+              trap - EXIT
+              git diff --exit-code
+              git checkout --detach "$candidate"
+              test "$(git rev-parse HEAD)" = "$candidate"
+              git submodule update --init --recursive --jobs 1
+              python3 -I tools/check_conventions.py --base 504ea3b53b237a5ea99e6daeee23b1edf3758368 --head HEAD
+              git diff --check 504ea3b53b237a5ea99e6daeee23b1edf3758368...HEAD
+              python3 -I core/libs/tests/test_public_headers.py --audit-only --manifest "$RUNNER_TEMP/public-$topic.json"
+              cmake -S . -B build-behavior -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DCMAKE_EXE_LINKER_FLAGS="$link_flags"
+              cmake --build build-behavior --parallel 1 --target $targets
+              sha256sum --check "$RUNNER_TEMP/$topic-fixture.sha256"
+              ctest --test-dir build-behavior --show-only=json-v1 -R "$pattern" > "$RUNNER_TEMP/selected.json"
+              python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert len(d["tests"])==8,d' "$RUNNER_TEMP/selected.json"
+              ctest --test-dir build-behavior --parallel 1 --output-on-failure --no-tests=error -R "$pattern" -V
+              ctest --test-dir build-behavior --parallel 1 --output-on-failure --no-tests=error -R "$pattern" --repeat until-fail:2
+              if [[ "$RUNNER_OS" == Linux ]]; then
+                kernel=build-behavior/core/libs/libs/libkernel.prx
+                held="$RUNNER_TEMP/$topic-kernel.prx"
+                mv "$kernel" "$held"
+                trap 'mv "$held" "$kernel"' EXIT
+                python3 -c 'import ctypes,os,sys; p="build-behavior/core/libs/libs/"+sys.argv[1]; exec("try:\n ctypes.CDLL(p,mode=os.RTLD_NOW|os.RTLD_LOCAL)\nexcept OSError as e:\n print(e); assert \"libkernel.prx\" in str(e)\nelse:\n raise AssertionError(\"missing kernel unexpectedly loaded\")")' "$module"
+                set +e
+                ctest --test-dir build-behavior --parallel 1 --output-on-failure --no-tests=error -R "$patched_pattern" -V > "$RUNNER_TEMP/missing-kernel-$topic.log" 2>&1
+                negative_status=$?
+                set -e
+                cat "$RUNNER_TEMP/missing-kernel-$topic.log"
+                test "$negative_status" -ne 0
+                grep -F '3 tests failed out of 3' "$RUNNER_TEMP/missing-kernel-$topic.log"
+                mv "$held" "$kernel"
+                trap - EXIT
+                sha256sum --check "$RUNNER_TEMP/$topic-fixture.sha256"
+                ctest --test-dir build-behavior --parallel 1 --output-on-failure --no-tests=error -R "$pattern" -V
+              fi
+              git diff --exit-code
+            ) 2>&1 | tee "$RUNNER_TEMP/behavior-$topic.log"
             status=$?
             set -e
-            cat "$RUNNER_TEMP/red-$topic.log"
-            test "$status" -ne 0
-            grep -F "$failures tests failed out of 5" "$RUNNER_TEMP/red-$topic.log"
-            if [[ "$topic" == jxr ]]; then
-              grep -F 'forward success padding is not zero' "$RUNNER_TEMP/red-$topic.log"
-              grep -F 'reverse success padding is not zero' "$RUNNER_TEMP/red-$topic.log"
-            else
-              grep -F 'PFR null face: metrics returned 35, expected 6; host imports 1' "$RUNNER_TEMP/red-$topic.log"
-              test "$(grep -c 'PFR null-face returned 35, expected 6' "$RUNNER_TEMP/red-$topic.log")" -ge 3
-            fi
-            git restore -- "$build_file"
-            trap - EXIT
-            git diff --exit-code
+            if [[ "$status" -ne 0 ]]; then failed=1; fi
           done 3<<'CASES'
-          jxr@4357ce29ae6cfccdcc356cb9eddf23aca9e7b997@guest_jxr_lookup_tests guest_jxr_tests@^(guest_jxr|guest_jxr_lookup(_reference|_padding_(forward|reverse))?)$@2
-          pfr@085c71dd366e64845ba8252524985e738bab9110@guest_freetype_pfr_null_face_tests guest_freetype_pfr_tests libSceFreeTypeOptOl@^guest_freetype_pfr_(reference|null_face|(metrics|advance|kerning)_raw)$@4
+          jxr@4357ce29ae6cfccdcc356cb9eddf23aca9e7b997@fd4e2c5466d5a79ddbd4b7521e6810b090ade219@guest_jxr_lookup_tests guest_jxr_tests@^(guest_jxr|guest_jxr_lookup(_reference|_padding_(forward|reverse))?)$@^guest_jxr@2
+          pfr@085c71dd366e64845ba8252524985e738bab9110@1248d841c7b5dbcac6cd347432b0d9c10b991d77@guest_freetype_pfr_null_face_tests guest_freetype_pfr_tests libSceFreeTypeOptOl@^guest_freetype_pfr_(reference|null_face|(metrics|advance|kerning)_raw)$@^guest_freetype_pfr_@4
           CASES
+          exit "$failed"
+
+  windows-focused:
+    needs: linux-focused
+    if: always() && !cancelled() && github.repository == 'UnhealthyKraken/AnyPS5' && github.ref == 'refs/heads/ci/review-system-libraries-20261025'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      CTEST_PARALLEL_LEVEL: '1'
+      WINLIBS_RELEASE: 15.2.0posix-14.0.0-ucrt-r7
+      WINLIBS_ZIP: winlibs-x86_64-posix-seh-gcc-15.2.0-mingw-w64ucrt-14.0.0-r7.zip
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 4357ce29ae6cfccdcc356cb9eddf23aca9e7b997
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: recursive
+      - name: Install supported hosted WinLibs toolchain
+        run: |
+          set -euo pipefail
+          curl -sSfL -o "$RUNNER_TEMP/winlibs.zip" "https://github.com/brechtsanders/winlibs_mingw/releases/download/$WINLIBS_RELEASE/$WINLIBS_ZIP"
+          7z x "$RUNNER_TEMP/winlibs.zip" -oC:/winlibs > /dev/null
+          echo 'C:\winlibs\mingw64\bin' >> "$GITHUB_PATH"
+          for prefix in ucrt64 mingw64; do
+            bundle="C:/Program Files/Git/$prefix/etc/ssl/certs/ca-bundle.crt"
+            if [ -f "$bundle" ]; then echo "SSL_CERT_FILE=$bundle" >> "$GITHUB_ENV"; break; fi
+          done
+      - name: Compare baselines and candidates with complete focused suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcc --version
+          g++ --version
+          failed=0
+          while IFS='@' read -r -u 3 topic baseline candidate targets raw_pattern pattern failures; do
+            set +e
+            (
+              set -euo pipefail
+              git checkout --detach "$baseline"
+              git submodule update --init --recursive --jobs 1
+              if [[ "$topic" == jxr ]]; then
+                build_file=core/libs/prx/libSceJxr/CMakeLists.txt
+                test_target=guest_jxr_lookup_tests
+                patched_target=jxr_lookup_patched
+                fixture=guest_jxr_lookup_tests
+                patched_pattern='^guest_jxr_lookup.*_patched$'
+                module=libSceJxr.prx
+              else
+                build_file=core/libs/prx/libSceFreeTypeOptOl/CMakeLists.txt
+                test_target=guest_freetype_pfr_tests
+                patched_target=guest_freetype_pfr_libraries
+                fixture=guest_freetype_pfr_tests
+                patched_pattern='^guest_freetype_pfr_(metrics|advance|kerning)_patched$'
+                module=libSceFreeType.prx
+              fi
+              link_flags=
+              if [[ "$RUNNER_OS" == Windows ]]; then
+                fixture=$fixture.exe
+                link_flags=-Wl,--no-insert-timestamp
+              fi
+              trap 'git restore -- "$build_file"' EXIT
+              python -c 'import sys; from pathlib import Path; p=Path(sys.argv[1]); s=p.read_text(); n="    add_dependencies("+sys.argv[2]+" "+sys.argv[3]+")"; assert s.count(n)==1; p.write_text(s.replace(n,""))' "$build_file" "$test_target" "$patched_target"
+              cmake -S . -B build-behavior -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DCMAKE_EXE_LINKER_FLAGS="$link_flags"
+              cmake --build build-behavior --parallel 1 --target $targets
+              ctest --test-dir build-behavior --show-only=json-v1 -R "$raw_pattern" > "$RUNNER_TEMP/selected.json"
+              python -c 'import json,sys; d=json.load(open(sys.argv[1])); assert len(d["tests"])==5,d' "$RUNNER_TEMP/selected.json"
+              set +e
+              ctest --test-dir build-behavior --parallel 1 --output-on-failure --no-tests=error -R "$raw_pattern" -V > "$RUNNER_TEMP/red-$topic.log" 2>&1
+              red_status=$?
+              set -e
+              cat "$RUNNER_TEMP/red-$topic.log"
+              test "$red_status" -ne 0
+              grep -F "$failures tests failed out of 5" "$RUNNER_TEMP/red-$topic.log"
+              if [[ "$topic" == jxr ]]; then
+                grep -F 'forward success padding is not zero' "$RUNNER_TEMP/red-$topic.log"
+                grep -F 'reverse success padding is not zero' "$RUNNER_TEMP/red-$topic.log"
+              else
+                grep -F 'PFR null face: metrics returned 35, expected 6; host imports 1' "$RUNNER_TEMP/red-$topic.log"
+                test "$(grep -c 'PFR null-face returned 35, expected 6' "$RUNNER_TEMP/red-$topic.log")" -ge 3
+              fi
+              sha256sum "build-behavior/tests/$fixture" > "$RUNNER_TEMP/$topic-fixture.sha256"
+              git restore -- "$build_file"
+              trap - EXIT
+              git diff --exit-code
+              git checkout --detach "$candidate"
+              test "$(git rev-parse HEAD)" = "$candidate"
+              git submodule update --init --recursive --jobs 1
+              python -I tools/check_conventions.py --base 504ea3b53b237a5ea99e6daeee23b1edf3758368 --head HEAD
+              git diff --check 504ea3b53b237a5ea99e6daeee23b1edf3758368...HEAD
+              python -I core/libs/tests/test_public_headers.py --audit-only --manifest "$RUNNER_TEMP/public-$topic.json"
+              cmake -S . -B build-behavior -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DCMAKE_EXE_LINKER_FLAGS="$link_flags"
+              cmake --build build-behavior --parallel 1 --target $targets
+              sha256sum --check "$RUNNER_TEMP/$topic-fixture.sha256"
+              ctest --test-dir build-behavior --show-only=json-v1 -R "$pattern" > "$RUNNER_TEMP/selected.json"
+              python -c 'import json,sys; d=json.load(open(sys.argv[1])); assert len(d["tests"])==8,d' "$RUNNER_TEMP/selected.json"
+              ctest --test-dir build-behavior --parallel 1 --output-on-failure --no-tests=error -R "$pattern" -V
+              ctest --test-dir build-behavior --parallel 1 --output-on-failure --no-tests=error -R "$pattern" --repeat until-fail:2
+              if [[ "$RUNNER_OS" == Linux ]]; then
+                kernel=build-behavior/core/libs/libs/libkernel.prx
+                held="$RUNNER_TEMP/$topic-kernel.prx"
+                mv "$kernel" "$held"
+                trap 'mv "$held" "$kernel"' EXIT
+                python -c 'import ctypes,os,sys; p="build-behavior/core/libs/libs/"+sys.argv[1]; exec("try:\n ctypes.CDLL(p,mode=os.RTLD_NOW|os.RTLD_LOCAL)\nexcept OSError as e:\n print(e); assert \"libkernel.prx\" in str(e)\nelse:\n raise AssertionError(\"missing kernel unexpectedly loaded\")")' "$module"
+                set +e
+                ctest --test-dir build-behavior --parallel 1 --output-on-failure --no-tests=error -R "$patched_pattern" -V > "$RUNNER_TEMP/missing-kernel-$topic.log" 2>&1
+                negative_status=$?
+                set -e
+                cat "$RUNNER_TEMP/missing-kernel-$topic.log"
+                test "$negative_status" -ne 0
+                grep -F '3 tests failed out of 3' "$RUNNER_TEMP/missing-kernel-$topic.log"
+                mv "$held" "$kernel"
+                trap - EXIT
+                sha256sum --check "$RUNNER_TEMP/$topic-fixture.sha256"
+                ctest --test-dir build-behavior --parallel 1 --output-on-failure --no-tests=error -R "$pattern" -V
+              fi
+              git diff --exit-code
+            ) 2>&1 | tee "$RUNNER_TEMP/behavior-$topic.log"
+            status=$?
+            set -e
+            if [[ "$status" -ne 0 ]]; then failed=1; fi
+          done 3<<'CASES'
+          jxr@4357ce29ae6cfccdcc356cb9eddf23aca9e7b997@fd4e2c5466d5a79ddbd4b7521e6810b090ade219@guest_jxr_lookup_tests guest_jxr_tests@^(guest_jxr|guest_jxr_lookup(_reference|_padding_(forward|reverse))?)$@^guest_jxr@2
+          pfr@085c71dd366e64845ba8252524985e738bab9110@1248d841c7b5dbcac6cd347432b0d9c10b991d77@guest_freetype_pfr_null_face_tests guest_freetype_pfr_tests libSceFreeTypeOptOl@^guest_freetype_pfr_(reference|null_face|(metrics|advance|kerning)_raw)$@^guest_freetype_pfr_@4
+          CASES
+          exit "$failed"
